@@ -36,3 +36,9 @@ export interface ParseResult {
   cues: Cue[];
   warnings: string[];
 }
+
+/** 一段检测到的静音区间（秒，毫秒精度） */
+export interface SilenceSegment {
+  start: number;
+  end: number;
+}

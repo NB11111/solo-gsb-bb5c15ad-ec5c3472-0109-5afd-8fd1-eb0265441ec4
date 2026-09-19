@@ -11,6 +11,8 @@ import {
   replaceHistory,
   undoHistory
 } from './lib/cues';
+import { detectSilence, MERGE_GAP, MIN_SILENCE } from './lib/silence';
+import { analyzeAudioFile, type AnalysisHandle, type RmsProfile } from './lib/audioAnalysis';
 
 interface Toast {
   id: number;
@@ -32,12 +34,28 @@ export default function App() {
   const [srtName, setSrtName] = useState<string | null>(null);
   const [audioName, setAudioName] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // 静音吸附：RMS 序列（解码产物）、可调阈值、吸附开关、分析状态
+  const [rmsProfile, setRmsProfile] = useState<RmsProfile | null>(null);
+  const [silenceThreshold, setSilenceThreshold] = useState(0.01);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [analyzing, setAnalyzing] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const analysisRef = useRef<AnalysisHandle | null>(null);
   const toastId = useRef(0);
 
   const cues = history.present;
+
+  // 阈值变化时基于已算好的 RMS 序列即时重新分段，无需重新解码
+  const silenceSegments = useMemo(() => {
+    if (!rmsProfile) return [];
+    return detectSilence(rmsProfile.rms, rmsProfile.windowSize, {
+      threshold: silenceThreshold,
+      minSilence: MIN_SILENCE,
+      mergeGap: MERGE_GAP
+    });
+  }, [rmsProfile, silenceThreshold]);
 
   const pushToast = useCallback((kind: Toast['kind'], text: string) => {
     toastId.current += 1;
@@ -68,6 +86,7 @@ export default function App() {
     return () => {
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
       audioRef.current?.pause();
+      analysisRef.current?.cancel();
     };
   }, []);
 
@@ -81,6 +100,29 @@ export default function App() {
       el.load();
       setAudioName(file.name);
       setCurrentTime(0);
+
+      // 更换音频：取消旧分析并阻止旧结果回写
+      analysisRef.current?.cancel();
+      setRmsProfile(null);
+      setAnalyzing(true);
+      const handle = analyzeAudioFile(file);
+      analysisRef.current = handle;
+      handle.promise
+        .then((profile) => {
+          if (analysisRef.current !== handle) return; // 已被更新的分析取代
+          analysisRef.current = null;
+          setAnalyzing(false);
+          if (!profile) return; // 已取消
+          setRmsProfile(profile);
+          pushToast('info', `静音分析完成：${file.name}`);
+        })
+        .catch(() => {
+          if (analysisRef.current !== handle) return;
+          analysisRef.current = null;
+          setAnalyzing(false);
+          pushToast('warn', `无法解码音频，静音吸附不可用：${file.name}`);
+        });
+
       pushToast('info', `已加载音频：${file.name}`);
     },
     [ensureAudio, pushToast]
@@ -190,9 +232,16 @@ export default function App() {
   }, [cues, srtName, pushToast]);
 
   const statusText = useMemo(() => {
-    if (cues.length === 0) return '等待导入：先选择 SRT，再选择音频';
-    return `${cues.length} 条字幕 · 已记录 ${history.past.length} 次调整`;
-  }, [cues.length, history.past.length]);
+    const base =
+      cues.length === 0
+        ? '等待导入：先选择 SRT，再选择音频'
+        : `${cues.length} 条字幕 · 已记录 ${history.past.length} 次调整`;
+    if (analyzing) return `${base} · 静音分析中…`;
+    if (rmsProfile) {
+      return `${base} · 检测到 ${silenceSegments.length} 段静音（吸附${snapEnabled ? '开' : '关'}）`;
+    }
+    return base;
+  }, [cues.length, history.past.length, analyzing, rmsProfile, silenceSegments.length, snapEnabled]);
 
   return (
     <div className="app">
@@ -216,6 +265,10 @@ export default function App() {
         onConstraintsChange={setConstraints}
         onExport={exportSrt}
         canExport={cues.length > 0}
+        snapEnabled={snapEnabled}
+        onSnapEnabledChange={setSnapEnabled}
+        silenceThreshold={silenceThreshold}
+        onSilenceThresholdChange={setSilenceThreshold}
       />
 
       <main className="main">
@@ -223,7 +276,7 @@ export default function App() {
           <div className="status-bar">
             <span>{statusText}</span>
             <span className="status-hint">
-              拖动字幕块左右边界校对 · 越界自动回弹并提示原因 · 点击字幕块定位播放
+              拖动字幕块左右边界校对 · 靠近静音边缘自动吸附 · 越界自动回弹并提示原因 · 点击字幕块定位播放
             </span>
           </div>
           <Timeline
@@ -234,6 +287,8 @@ export default function App() {
             pps={pps}
             constraints={constraints}
             selectedId={selectedId}
+            silenceSegments={silenceSegments}
+            snapEnabled={snapEnabled}
             onSelect={setSelectedId}
             onSeek={seekAndPlay}
             onCommit={commit}

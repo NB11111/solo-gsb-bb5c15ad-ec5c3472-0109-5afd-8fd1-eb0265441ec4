@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Constraints, Cue, DragEdge, RejectReason } from '../types';
+import type { Constraints, Cue, DragEdge, RejectReason, SilenceSegment } from '../types';
 import { applyEdge, validateEdge } from '../lib/cues';
+import { SNAP_RANGE, snapToSilenceEdge } from '../lib/silence';
 import { formatClock } from '../lib/srt';
 
 interface TimelineProps {
@@ -12,6 +13,10 @@ interface TimelineProps {
   pps: number; // 每秒对应像素
   constraints: Constraints;
   selectedId: string | null;
+  /** 检测到的静音段（用于叠加静音带与边界吸附） */
+  silenceSegments: SilenceSegment[];
+  /** 静音吸附开关 */
+  snapEnabled: boolean;
   onSelect: (id: string | null) => void;
   onSeek: (t: number) => void;
   /** 合法拖放结束：提交边界并进入历史栈 */
@@ -44,6 +49,10 @@ interface DragState {
   candidate: number;
   valid: boolean;
   message: string;
+  /** 实际吸附到的静音边缘时间；未吸附为 null */
+  snappedTo: number | null;
+  /** 吸附说明（成功吸附或吸附被拒绝的原因），拖动中实时展示 */
+  snapNote: string;
   startX: number;
   moved: boolean;
 }
@@ -56,6 +65,8 @@ export default function Timeline({
   pps,
   constraints,
   selectedId,
+  silenceSegments,
+  snapEnabled,
   onSelect,
   onSeek,
   onCommit
@@ -187,13 +198,36 @@ export default function Timeline({
     };
   }, []);
 
-  // 拖动中的实时校验
+  // 拖动中的实时校验：先尝试静音吸附，吸附结果同样要过约束校验
   const evaluate = useCallback(
     (cueId: string, edge: DragEdge, t: number) => {
-      const result = validateEdge(cues, cueId, edge, t, constraints);
-      return result.ok ? { valid: true, message: '' } : { valid: false, message: result.message };
+      let candidate = t;
+      let snappedTo: number | null = null;
+      let snapNote = '';
+      if (snapEnabled && silenceSegments.length > 0) {
+        const target = snapToSilenceEdge(t, silenceSegments, SNAP_RANGE);
+        if (target !== null && Math.abs(target - t) > 1e-9) {
+          const check = validateEdge(cues, cueId, edge, target, constraints);
+          if (check.ok) {
+            candidate = target;
+            snappedTo = target;
+            snapNote = `已吸附到静音边缘 ${target.toFixed(3)}s`;
+          } else {
+            // 吸附结果不合法：保留未吸附候选，并说明原因
+            snapNote = `吸附目标 ${target.toFixed(3)}s 不合法（${check.message}），已保留未吸附位置`;
+          }
+        }
+      }
+      const result = validateEdge(cues, cueId, edge, candidate, constraints);
+      return {
+        candidate,
+        snappedTo,
+        snapNote,
+        valid: result.ok,
+        message: result.ok ? '' : result.message
+      };
     },
-    [cues, constraints]
+    [cues, constraints, snapEnabled, silenceSegments]
   );
 
   const beginDrag = (e: React.PointerEvent, cue: Cue, edge: DragEdge) => {
@@ -202,15 +236,15 @@ export default function Timeline({
     (e.target as Element).setPointerCapture(e.pointerId);
     onSelect(cue.id);
     const t = timeFromClientX(e.clientX);
-    const { valid, message } = evaluate(cue.id, edge, t);
-    setDrag({ cueId: cue.id, edge, candidate: t, valid, message, startX: e.clientX, moved: false });
+    const { candidate, valid, message, snappedTo, snapNote } = evaluate(cue.id, edge, t);
+    setDrag({ cueId: cue.id, edge, candidate, valid, message, snappedTo, snapNote, startX: e.clientX, moved: false });
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
     if (!drag) return;
     const t = Math.max(0, timeFromClientX(e.clientX));
-    const { valid, message } = evaluate(drag.cueId, drag.edge, t);
-    setDrag({ ...drag, candidate: t, valid, message, moved: drag.moved || Math.abs(e.clientX - drag.startX) > 4 });
+    const { candidate, valid, message, snappedTo, snapNote } = evaluate(drag.cueId, drag.edge, t);
+    setDrag({ ...drag, candidate, valid, message, snappedTo, snapNote, moved: drag.moved || Math.abs(e.clientX - drag.startX) > 4 });
   };
 
   const finishDrag = (e: React.PointerEvent) => {
@@ -222,8 +256,9 @@ export default function Timeline({
         onCommit(applyEdge(cues, drag.cueId, drag.edge, snapped));
       }
     } else if (!drag.valid) {
-      // 越界回弹：不修改数据，标出原因与红色虚影
-      flashReject({ edge: drag.edge, message: drag.message, time: drag.candidate });
+      // 越界回弹：不修改数据，标出原因与红色虚影（吸附曾被拒绝时一并说明）
+      const message = drag.snapNote ? `${drag.message}；${drag.snapNote}` : drag.message;
+      flashReject({ edge: drag.edge, message, time: drag.candidate });
     }
     setDrag(null);
     try {
@@ -308,6 +343,20 @@ export default function Timeline({
             }
           }}
         >
+          {/* 静音带：检测到的静音段底色，吸附即对齐到这些带的边缘 */}
+          {silenceSegments.map((s, i) => (
+            <div
+              key={`sil-${i}`}
+              className="silence-band"
+              style={{
+                left: s.start * pps,
+                width: Math.max(1, (s.end - s.start) * pps),
+                top: 4,
+                bottom: 4
+              }}
+            />
+          ))}
+
           {sorted.map((cue) => {
             const v = visualCue(cue);
             const isDragTarget = drag?.cueId === cue.id;
@@ -363,8 +412,8 @@ export default function Timeline({
             );
           })}
 
-          {/* 红色虚影：非法拖到的位置 */}
-          {reject && dragCue && (
+          {/* 红色虚影：非法拖到的位置（松手后 drag 已清空，仅依赖 reject 自身定位） */}
+          {reject && (
             <div
               className="reject-ghost"
               style={{
@@ -380,16 +429,22 @@ export default function Timeline({
             </div>
           )}
 
-          {/* 拖动中的实时原因气泡 */}
-          {drag && !drag.valid && (
+          {/* 吸附成功时标出目标静音边缘 */}
+          {drag && drag.snappedTo !== null && (
+            <div className="snap-line" style={{ left: drag.snappedTo * pps }} />
+          )}
+
+          {/* 拖动中的实时原因气泡（含吸附说明） */}
+          {drag && (drag.snapNote || !drag.valid) && (
             <div
-              className="reject-bubble live"
+              className={`reject-bubble live${drag.valid ? ' snap' : ''}`}
               style={{
                 left: Math.min(drag.candidate * pps + 12, trackWidth - 220),
                 top: 0
               }}
             >
-              {drag.message}
+              {!drag.valid && <div>{drag.message}</div>}
+              {drag.snapNote && <div>{drag.snapNote}</div>}
             </div>
           )}
 

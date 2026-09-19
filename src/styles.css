@@ -144,6 +144,33 @@ body {
   font-size: 13px;
 }
 
+.snap-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.snap-group input[type='number'] {
+  width: 70px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #0e1424;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.snap-toggle {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.snap-toggle input[type='checkbox'] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 /* ---------------- 主区域 ---------------- */
 
 .main {
@@ -369,6 +396,42 @@ body {
   border-left: 1px dashed rgba(245, 181, 68, 0.8);
   pointer-events: none;
   z-index: 3;
+}
+
+/* 静音带与吸附指示 */
+
+.silence-band {
+  position: absolute;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(138, 151, 179, 0.08),
+    rgba(138, 151, 179, 0.08) 6px,
+    rgba(138, 151, 179, 0.16) 6px,
+    rgba(138, 151, 179, 0.16) 12px
+  );
+  border-left: 1px solid rgba(138, 151, 179, 0.45);
+  border-right: 1px solid rgba(138, 151, 179, 0.45);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.snap-line {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 0;
+  border-left: 2px solid var(--accent);
+  box-shadow: 0 0 6px rgba(79, 140, 255, 0.8);
+  pointer-events: none;
+  z-index: 7;
+}
+
+.reject-bubble.live.snap {
+  background: #12233c;
+  border-color: var(--accent);
+  color: #cfe3ff;
+  white-space: normal;
+  max-width: 360px;
 }
 
 /* 播放头 */

@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "本地运行的字幕节奏校对台：SRT 导入、时间轴拖拽校对、约束回弹、撤销重做、SRT 导出",
+  "description": "本地运行的字幕节奏校对台：SRT 导入、时间轴拖拽校对、静音检测与边界吸附、约束回弹、撤销重做、SRT 导出",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

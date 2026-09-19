@@ -21,6 +21,12 @@ interface ToolbarProps {
   onConstraintsChange: (next: Constraints) => void;
   onExport: () => void;
   canExport: boolean;
+  /** 静音吸附开关 */
+  snapEnabled: boolean;
+  onSnapEnabledChange: (on: boolean) => void;
+  /** 静音 RMS 阈值（线性振幅） */
+  silenceThreshold: number;
+  onSilenceThresholdChange: (v: number) => void;
 }
 
 export default function Toolbar(p: ToolbarProps) {
@@ -107,6 +113,32 @@ export default function Toolbar(p: ToolbarProps) {
             }
           />
           s
+        </label>
+      </div>
+
+      <div className="group snap-group">
+        <label className="snap-toggle" title="拖动边界进入静音段边缘 ±150ms 时吸附到最近边缘（等距取更早者）">
+          <input
+            type="checkbox"
+            checked={p.snapEnabled}
+            onChange={(e) => p.onSnapEnabledChange(e.target.checked)}
+          />
+          静音吸附
+        </label>
+        <label title="各声道 20ms 窗口 RMS 最大值低于该阈值视为静音，调整后即时重新分段">
+          静音阈值
+          <input
+            type="number"
+            min={0.0001}
+            max={0.5}
+            step={0.005}
+            value={p.silenceThreshold}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (!Number.isFinite(v)) return;
+              p.onSilenceThresholdChange(Math.min(0.5, Math.max(0.0001, v)));
+            }}
+          />
         </label>
       </div>
 
