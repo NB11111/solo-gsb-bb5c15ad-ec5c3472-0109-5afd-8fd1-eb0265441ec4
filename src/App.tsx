@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Toolbar from './components/Toolbar';
 import Timeline from './components/Timeline';
 import CueList from './components/CueList';
-import type { Constraints, Cue } from './types';
+import type { Constraints, Cue, SilenceStatus } from './types';
 import { parseSrt, serializeSrt } from './lib/srt';
 import {
   commitHistory,
@@ -11,11 +11,22 @@ import {
   replaceHistory,
   undoHistory
 } from './lib/cues';
+import { detectSilences, type WindowLevels } from './lib/silence';
+import {
+  AbortToken,
+  analyzeAudioFile,
+  isAbortError
+} from './lib/audioAnalysis';
 
 interface Toast {
   id: number;
   kind: 'warn' | 'info' | 'error';
   text: string;
+}
+
+/** dBFS 风格阈值转线性振幅：-60dB≈0.001, -40dB=0.01, -20dB=0.1 */
+function dbToAmplitude(db: number): number {
+  return Math.min(1, Math.pow(10, db / 20));
 }
 
 export default function App() {
@@ -33,9 +44,18 @@ export default function App() {
   const [audioName, setAudioName] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
+  // 静音分析：吸附开关、可调阈值（dB）、分析状态与窗口能量
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [silenceThresholdDb, setSilenceThresholdDb] = useState(-40);
+  const [levels, setLevels] = useState<WindowLevels | null>(null);
+  const [silenceStatus, setSilenceStatus] = useState<SilenceStatus>('idle');
+  const [silenceError, setSilenceError] = useState<string | null>(null);
+
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const toastId = useRef(0);
+  // 当前音频分析的取消令牌；更换音频时取消旧分析并阻止旧结果回写
+  const analysisTokenRef = useRef<AbortToken | null>(null);
 
   const cues = history.present;
 
@@ -66,10 +86,35 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      analysisTokenRef.current?.abort();
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
       audioRef.current?.pause();
     };
   }, []);
+
+  /** 用 Web Audio API 解码并分析窗口能量；token 保证旧音频结果不会回写 */
+  const runSilenceAnalysis = useCallback(
+    (file: File) => {
+      analysisTokenRef.current?.abort();
+      const token = new AbortToken();
+      analysisTokenRef.current = token;
+      setSilenceStatus('analyzing');
+      setSilenceError(null);
+      analyzeAudioFile(file, token)
+        .then((result) => {
+          if (token.signal) return; // 已更换音频，丢弃旧结果
+          setLevels({ levels: result.levels, windowSize: result.windowSize, duration: result.duration });
+          setSilenceStatus('done');
+        })
+        .catch((err: unknown) => {
+          if (isAbortError(err)) return; // 更换音频导致的取消，静默处理
+          setSilenceStatus('error');
+          setSilenceError(err instanceof Error ? err.message : String(err));
+          pushToast('error', `静音分析失败：${err instanceof Error ? err.message : '音频无法解码'}`);
+        });
+    },
+    [pushToast]
+  );
 
   const handleImportAudio = useCallback(
     (file: File) => {
@@ -81,9 +126,19 @@ export default function App() {
       el.load();
       setAudioName(file.name);
       setCurrentTime(0);
+      setLevels(null);
+      // 取消旧分析（若正在进行），并以新令牌开始本次分析，阻止旧结果回写
+      runSilenceAnalysis(file);
       pushToast('info', `已加载音频：${file.name}`);
     },
-    [ensureAudio, pushToast]
+    [ensureAudio, pushToast, runSilenceAnalysis]
+  );
+
+  // 阈值调整时基于窗口能量重新分段（纯前端计算，无需重新解码）
+  const silenceThreshold = useMemo(() => dbToAmplitude(silenceThresholdDb), [silenceThresholdDb]);
+  const silenceSegments = useMemo(
+    () => (levels ? detectSilences(levels, { threshold: silenceThreshold }) : []),
+    [levels, silenceThreshold]
   );
 
   const seek = useCallback(
@@ -190,9 +245,15 @@ export default function App() {
   }, [cues, srtName, pushToast]);
 
   const statusText = useMemo(() => {
-    if (cues.length === 0) return '等待导入：先选择 SRT，再选择音频';
-    return `${cues.length} 条字幕 · 已记录 ${history.past.length} 次调整`;
-  }, [cues.length, history.past.length]);
+    const parts: string[] = [];
+    parts.push(cues.length === 0 ? '等待导入：先选择 SRT，再选择音频' : `${cues.length} 条字幕`);
+    if (silenceStatus === 'analyzing') parts.push('静音分析中…');
+    else if (silenceStatus === 'done') {
+      parts.push(`${silenceSegments.length} 段静音` + (snapEnabled ? '· 吸附已开启' : '· 吸附已关闭'));
+    } else if (silenceStatus === 'error') parts.push('静音分析失败');
+    if (cues.length > 0) parts.push(`已记录 ${history.past.length} 次调整`);
+    return parts.join(' · ');
+  }, [cues.length, history.past.length, silenceStatus, silenceSegments.length, snapEnabled]);
 
   return (
     <div className="app">
@@ -216,6 +277,13 @@ export default function App() {
         onConstraintsChange={setConstraints}
         onExport={exportSrt}
         canExport={cues.length > 0}
+        snapEnabled={snapEnabled}
+        onSnapEnabledChange={setSnapEnabled}
+        silenceThresholdDb={silenceThresholdDb}
+        onSilenceThresholdChange={setSilenceThresholdDb}
+        silenceStatus={silenceStatus}
+        silenceSegmentCount={silenceSegments.length}
+        silenceError={silenceError}
       />
 
       <main className="main">
@@ -223,7 +291,7 @@ export default function App() {
           <div className="status-bar">
             <span>{statusText}</span>
             <span className="status-hint">
-              拖动字幕块左右边界校对 · 越界自动回弹并提示原因 · 点击字幕块定位播放
+              拖动字幕块左右边界校对 · 靠近静音带边缘 150ms 自动吸附 · 越界自动回弹并提示原因 · 点击字幕块定位播放
             </span>
           </div>
           <Timeline
@@ -234,9 +302,12 @@ export default function App() {
             pps={pps}
             constraints={constraints}
             selectedId={selectedId}
+            silences={silenceSegments}
+            snapEnabled={snapEnabled}
             onSelect={setSelectedId}
             onSeek={seekAndPlay}
             onCommit={commit}
+            onNotice={(text) => pushToast('warn', text)}
           />
         </section>
         <CueList

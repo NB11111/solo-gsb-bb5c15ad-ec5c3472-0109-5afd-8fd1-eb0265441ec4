@@ -31,6 +31,15 @@ export interface Constraints {
   minGap: number;
 }
 
+/** 静音段（秒，半开区间 [start, end)） */
+export interface SilenceSegment {
+  start: number;
+  end: number;
+}
+
+/** 静音分析状态 */
+export type SilenceStatus = 'idle' | 'analyzing' | 'done' | 'error';
+
 /** 导入结果 */
 export interface ParseResult {
   cues: Cue[];

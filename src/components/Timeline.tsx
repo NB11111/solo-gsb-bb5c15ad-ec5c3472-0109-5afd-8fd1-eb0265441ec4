@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Constraints, Cue, DragEdge, RejectReason } from '../types';
-import { applyEdge, validateEdge } from '../lib/cues';
+import type { Constraints, Cue, DragEdge, RejectReason, SilenceSegment } from '../types';
+import { applyEdge } from '../lib/cues';
 import { formatClock } from '../lib/srt';
+import { resolveEdgeCandidate, type SnapEdge } from '../lib/silence';
 
 interface TimelineProps {
   cues: Cue[];
@@ -12,10 +13,16 @@ interface TimelineProps {
   pps: number; // 每秒对应像素
   constraints: Constraints;
   selectedId: string | null;
+  /** 检测到的静音段（秒），用于叠加静音带与吸附 */
+  silences: SilenceSegment[];
+  /** 静音吸附开关 */
+  snapEnabled: boolean;
   onSelect: (id: string | null) => void;
   onSeek: (t: number) => void;
   /** 合法拖放结束：提交边界并进入历史栈 */
   onCommit: (next: Cue[]) => void;
+  /** 非阻断提示（如吸附点不合法而回退） */
+  onNotice: (text: string) => void;
 }
 
 const LANE_HEIGHT = 52;
@@ -41,9 +48,18 @@ function tickLabel(t: number, interval: number): string {
 interface DragState {
   cueId: string;
   edge: DragEdge;
+  /** 鼠标位置对应的原始候选时间（未吸附） */
   candidate: number;
+  /** 最终采用的时间（可能被吸附到静音边缘） */
+  resolvedTime: number;
   valid: boolean;
   message: string;
+  /** 是否吸附到静音边缘 */
+  snapped: boolean;
+  /** 吸附目标边缘 */
+  snapEdge: SnapEdge | null;
+  /** 吸附点不合法、已回退原候选时的原因 */
+  snapRejected: string | null;
   startX: number;
   moved: boolean;
 }
@@ -56,9 +72,12 @@ export default function Timeline({
   pps,
   constraints,
   selectedId,
+  silences,
+  snapEnabled,
   onSelect,
   onSeek,
-  onCommit
+  onCommit,
+  onNotice
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const laneScrollRef = useRef<HTMLDivElement>(null);
@@ -187,13 +206,21 @@ export default function Timeline({
     };
   }, []);
 
-  // 拖动中的实时校验
-  const evaluate = useCallback(
-    (cueId: string, edge: DragEdge, t: number) => {
-      const result = validateEdge(cues, cueId, edge, t, constraints);
-      return result.ok ? { valid: true, message: '' } : { valid: false, message: result.message };
+  // 拖动中的实时解析：先尝试静音吸附，吸附点仍须通过最短时长 / 最小间隔校验
+  const resolve = useCallback(
+    (cueId: string, edge: DragEdge, t: number): Omit<DragState, 'cueId' | 'edge' | 'startX' | 'moved'> => {
+      const r = resolveEdgeCandidate(cues, cueId, edge, t, constraints, silences, snapEnabled);
+      return {
+        candidate: t,
+        resolvedTime: r.time,
+        valid: r.valid,
+        message: r.message,
+        snapped: r.snapped,
+        snapEdge: r.edge,
+        snapRejected: r.snapRejected
+      };
     },
-    [cues, constraints]
+    [cues, constraints, silences, snapEnabled]
   );
 
   const beginDrag = (e: React.PointerEvent, cue: Cue, edge: DragEdge) => {
@@ -202,27 +229,36 @@ export default function Timeline({
     (e.target as Element).setPointerCapture(e.pointerId);
     onSelect(cue.id);
     const t = timeFromClientX(e.clientX);
-    const { valid, message } = evaluate(cue.id, edge, t);
-    setDrag({ cueId: cue.id, edge, candidate: t, valid, message, startX: e.clientX, moved: false });
+    const r = resolve(cue.id, edge, t);
+    setDrag({ cueId: cue.id, edge, ...r, startX: e.clientX, moved: false });
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
     if (!drag) return;
     const t = Math.max(0, timeFromClientX(e.clientX));
-    const { valid, message } = evaluate(drag.cueId, drag.edge, t);
-    setDrag({ ...drag, candidate: t, valid, message, moved: drag.moved || Math.abs(e.clientX - drag.startX) > 4 });
+    const r = resolve(drag.cueId, drag.edge, t);
+    setDrag({
+      ...drag,
+      ...r,
+      moved: drag.moved || Math.abs(e.clientX - drag.startX) > 4
+    });
   };
 
   const finishDrag = (e: React.PointerEvent) => {
     if (!drag) return;
+    if (drag.snapRejected) {
+      // 吸附点不合法：已保留未吸附候选，提示具体原因
+      onNotice(drag.snapRejected);
+    }
     if (drag.valid && drag.moved) {
       const cue = cues.find((c) => c.id === drag.cueId);
-      const snapped = Math.round(drag.candidate * 1000) / 1000;
-      if (cue && snapped !== (drag.edge === 'start' ? cue.start : cue.end)) {
+      const snapped = Math.round(drag.resolvedTime * 1000) / 1000;
+      const original = drag.edge === 'start' ? cue?.start : cue?.end;
+      if (cue && snapped !== original) {
         onCommit(applyEdge(cues, drag.cueId, drag.edge, snapped));
       }
     } else if (!drag.valid) {
-      // 越界回弹：不修改数据，标出原因与红色虚影
+      // 越界回弹：不修改数据，标出原因与红色虚影（使用未吸附候选位置）
       flashReject({ edge: drag.edge, message: drag.message, time: drag.candidate });
     }
     setDrag(null);
@@ -233,10 +269,12 @@ export default function Timeline({
     }
   };
 
-  // 拖动预览：被拖的 cue 以候选时间渲染；数据本身不变，松手非法即自然回弹
+  // 拖动预览：被拖的 cue 以解析后时间（可能已吸附）渲染；数据本身不变，松手非法即自然回弹
   const visualCue = (cue: Cue): Cue => {
     if (drag && drag.cueId === cue.id) {
-      return drag.edge === 'start' ? { ...cue, start: drag.candidate } : { ...cue, end: drag.candidate };
+      return drag.edge === 'start'
+        ? { ...cue, start: drag.resolvedTime }
+        : { ...cue, end: drag.resolvedTime };
     }
     return cue;
   };
@@ -285,6 +323,14 @@ export default function Timeline({
               <span className="tick-label">{tickLabel(t, interval)}</span>
             </div>
           ))}
+          {silences.map((seg, i) => (
+            <div
+              key={`rs-${i}`}
+              className="silence-band ruler-band"
+              style={{ left: seg.start * pps, width: Math.max(2, (seg.end - seg.start) * pps) }}
+              title={`静音 ${formatClock(seg.start)} → ${formatClock(seg.end)}`}
+            />
+          ))}
           {duration > 0 && (
             <div className="audio-end" style={{ left: duration * pps }} title={`音频结尾 ${formatClock(duration)}`}>
               ♫
@@ -308,6 +354,21 @@ export default function Timeline({
             }
           }}
         >
+          {/* 静音带：Web Audio 检测出的连续静音段叠加在时间轴上 */}
+          {silences.map((seg, i) => (
+            <div
+              key={`ls-${i}`}
+              className={[
+                'silence-band lane-band',
+                drag?.snapEdge?.segment === seg && 'snap-target'
+              ].join(' ')}
+              style={{ left: seg.start * pps, width: Math.max(2, (seg.end - seg.start) * pps), top: 6, height: LANE_HEIGHT + 12 }}
+              title={`静音 ${formatClock(seg.start)} → ${formatClock(seg.end)}`}
+            >
+              <span className="silence-tag">静</span>
+            </div>
+          ))}
+
           {sorted.map((cue) => {
             const v = visualCue(cue);
             const isDragTarget = drag?.cueId === cue.id;
@@ -390,6 +451,35 @@ export default function Timeline({
               }}
             >
               {drag.message}
+            </div>
+          )}
+
+          {/* 吸附到静音边缘的提示与标记 */}
+          {drag && drag.snapped && drag.snapEdge && (
+            <>
+              <div className="snap-marker" style={{ left: drag.snapEdge.time * pps }} title="已吸附到静音边缘" />
+              <div
+                className="snap-bubble"
+                style={{
+                  left: Math.min(drag.snapEdge.time * pps + 10, trackWidth - 200),
+                  top: 0
+                }}
+              >
+                吸附静音{drag.snapEdge.side === 'start' ? '起点' : '终点'} {formatClock(drag.snapEdge.time)}
+              </div>
+            </>
+          )}
+
+          {/* 吸附点不合法而回退的提示（原候选仍合法时） */}
+          {drag && drag.snapRejected && drag.valid && (
+            <div
+              className="reject-bubble live snap-reject"
+              style={{
+                left: Math.min(drag.candidate * pps + 12, trackWidth - 260),
+                top: 22
+              }}
+            >
+              {drag.snapRejected}
             </div>
           )}
 

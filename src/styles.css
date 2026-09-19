@@ -144,6 +144,59 @@ body {
   font-size: 13px;
 }
 
+.silence-group {
+  gap: 10px;
+}
+
+.silence-group .switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.silence-group .switch input {
+  accent-color: var(--accent);
+}
+
+.silence-group .threshold {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.silence-group .threshold input[type='range'] {
+  width: 96px;
+}
+
+.silence-group .db-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  min-width: 48px;
+}
+
+.silence-state {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.silence-state.working {
+  color: var(--warn);
+}
+
+.silence-state.failed {
+  color: var(--danger);
+}
+
+.silence-group input:disabled + .threshold,
+.silence-group input[type='range']:disabled {
+  opacity: 0.45;
+}
+
 /* ---------------- 主区域 ---------------- */
 
 .main {
@@ -222,6 +275,94 @@ body {
   font-size: 13px;
   color: var(--warn);
   pointer-events: none;
+}
+
+/* 静音带 */
+
+.silence-band {
+  position: absolute;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.silence-band.ruler-band {
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(138, 151, 179, 0.16),
+    rgba(138, 151, 179, 0.16) 4px,
+    rgba(138, 151, 179, 0.07) 4px,
+    rgba(138, 151, 179, 0.07) 8px
+  );
+  border-left: 1px solid rgba(138, 151, 179, 0.35);
+  border-right: 1px solid rgba(138, 151, 179, 0.35);
+}
+
+.silence-band.lane-band {
+  border-radius: 4px;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(138, 151, 179, 0.14),
+    rgba(138, 151, 179, 0.14) 6px,
+    rgba(138, 151, 179, 0.05) 6px,
+    rgba(138, 151, 179, 0.05) 12px
+  );
+  border-left: 1px dashed rgba(138, 151, 179, 0.55);
+  border-right: 1px dashed rgba(138, 151, 179, 0.55);
+  z-index: 0;
+}
+
+.silence-band.lane-band.snap-target {
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(79, 140, 255, 0.28),
+    rgba(79, 140, 255, 0.28) 6px,
+    rgba(79, 140, 255, 0.1) 6px,
+    rgba(79, 140, 255, 0.1) 12px
+  );
+  border-left-color: var(--accent);
+  border-right-color: var(--accent);
+}
+
+.silence-tag {
+  position: absolute;
+  top: 1px;
+  left: 4px;
+  font-size: 9px;
+  color: rgba(138, 151, 179, 0.8);
+  user-select: none;
+}
+
+/* 吸附标记与气泡 */
+
+.snap-marker {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  width: 0;
+  border-left: 2px solid #7af0c0;
+  box-shadow: 0 0 8px rgba(122, 240, 192, 0.8);
+  z-index: 7;
+  pointer-events: none;
+}
+
+.snap-bubble {
+  position: absolute;
+  background: #12352a;
+  border: 1px solid #3fd08f;
+  color: #c3f7e3;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  z-index: 21;
+  pointer-events: none;
+}
+
+.reject-bubble.snap-reject {
+  top: 22px;
+  z-index: 21;
 }
 
 .lane {

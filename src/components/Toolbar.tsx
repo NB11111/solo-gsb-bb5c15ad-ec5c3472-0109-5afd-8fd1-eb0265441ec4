@@ -1,4 +1,4 @@
-import type { Constraints } from '../types';
+import type { Constraints, SilenceStatus } from '../types';
 import { formatClock } from '../lib/srt';
 
 interface ToolbarProps {
@@ -11,6 +11,11 @@ interface ToolbarProps {
   canRedo: boolean;
   pps: number;
   constraints: Constraints;
+  snapEnabled: boolean;
+  silenceThresholdDb: number;
+  silenceStatus: SilenceStatus;
+  silenceSegmentCount: number;
+  silenceError: string | null;
   onImportSrt: (file: File) => void;
   onImportAudio: (file: File) => void;
   onTogglePlay: () => void;
@@ -19,6 +24,8 @@ interface ToolbarProps {
   onRedo: () => void;
   onZoom: (pps: number) => void;
   onConstraintsChange: (next: Constraints) => void;
+  onSnapEnabledChange: (enabled: boolean) => void;
+  onSilenceThresholdChange: (db: number) => void;
   onExport: () => void;
   canExport: boolean;
 }
@@ -108,6 +115,55 @@ export default function Toolbar(p: ToolbarProps) {
           />
           s
         </label>
+      </div>
+
+      <div className="group silence-group">
+        <label className="switch" title="开启后，拖动字幕边界靠近静音段边缘 150ms 时自动吸附">
+          <input
+            type="checkbox"
+            checked={p.snapEnabled}
+            disabled={p.silenceStatus !== 'done'}
+            onChange={(e) => p.onSnapEnabledChange(e.target.checked)}
+          />
+          静音吸附
+        </label>
+        <label
+          className="threshold"
+          title={
+            p.silenceStatus === 'error'
+              ? `静音分析失败：${p.silenceError ?? '音频无法解码'}`
+              : '低于该 RMS 电平视为静音；仅对当前音频重新分段，无需重新解码'
+          }
+        >
+          阈值
+          <input
+            type="range"
+            min={-60}
+            max={-20}
+            step={1}
+            value={p.silenceThresholdDb}
+            disabled={p.silenceStatus !== 'done'}
+            onChange={(e) => p.onSilenceThresholdChange(Number(e.target.value))}
+          />
+          <span className="db-value">{p.silenceThresholdDb} dB</span>
+        </label>
+        <span
+          className={[
+            'silence-state',
+            p.silenceStatus === 'analyzing' && 'working',
+            p.silenceStatus === 'error' && 'failed'
+          ]
+            .filter(Boolean)
+            .join(' ')}
+        >
+          {p.silenceStatus === 'analyzing'
+            ? '静音分析中…'
+            : p.silenceStatus === 'error'
+              ? '分析失败'
+              : p.silenceStatus === 'done'
+                ? `${p.silenceSegmentCount} 段静音`
+                : '未分析'}
+        </span>
       </div>
 
       <div className="group history-group">
